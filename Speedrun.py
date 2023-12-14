@@ -23,7 +23,7 @@ COUNTRY_FLAGS_FILE = "country_flags.json"
 DOWNLOAD_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_download"
 FINAL_VIDEO_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_final"
 USED_RUNS_DB_FILE = "used_runs_db.json"
-FLAGS_FOLDER_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\images"
+FLAGS_FOLDER_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\flags"
 SCHEDULED_DATES_FILE = "scheduled_dates.json"
 api_cache = {}
 
@@ -64,42 +64,55 @@ def process_video(video_path, run_info, country_flags):
 
     orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Calculate new width and height to maintain 16:9 aspect ratio
+    new_width = 720
+    new_height = int((9 / 16) * new_width)
+
+    # Calculate padding to add to the top and bottom to maintain aspect ratio
+    vert_padding = (1280 - new_height) // 2
+
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-
-    final_video_name = f"{run_info['game_name'].strip()} - {run_info['category_name']} - {run_info['player_name']}.mp4"
+    final_video_name = f"{run_info['game_name']} - {run_info['category_name']} - {run_info['player_name']}.mp4"
     final_video_path = os.path.join(FINAL_VIDEO_PATH, safe_filename(final_video_name))
-    out = cv2.VideoWriter(final_video_path, fourcc, cap.get(cv2.CAP_PROP_FPS), (orig_width, orig_height))
 
-    if country_flag_path:
-        with open(country_flag_path, "rb") as svg_file:
-            png_image = cairosvg.svg2png(file_obj=svg_file)
-            flag_image = Image.open(BytesIO(png_image)).resize((50, 30))
+    out = cv2.VideoWriter(final_video_path, fourcc, cap.get(cv2.CAP_PROP_FPS), (720, 1280))
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        # Resize frame while maintaining aspect ratio
+        frame = cv2.resize(frame, (new_width, new_height))
+
+        # Create a new frame with black bars to maintain 9:16 aspect ratio
+        letterbox_frame = np.zeros((1280, 720, 3), dtype=np.uint8)
+        letterbox_frame[vert_padding:vert_padding + new_height, :] = frame
+
+        # Convert to PIL to use advanced drawing functions
+        frame_pil = Image.fromarray(cv2.cvtColor(letterbox_frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(frame_pil)
         font = ImageFont.truetype("arial.ttf", 32)
-        x, y = 50, 50
+        x, y = 50, vert_padding + 50  # Adjust y position due to padding
 
-        # Dessiner le contour (ombre) du texte
+        # Draw text shadow
         shadowcolor = "black"
         for adj in range(-1, 2):
             for adjy in range(-1, 2):
                 if adj != 0 or adjy != 0:
-                    draw.text((x+adj, y+adjy), text_content, font=font, fill=shadowcolor)
-
-        # Dessiner le texte principal
+                    draw.text((x + adj, y + adjy), text_content, font=font, fill=shadowcolor)
+        # Draw main text
         draw.text((x, y), text_content, font=font, fill="white")
 
-        if country_flag_path:
+        # If a flag image is available, convert it from SVG to PNG and draw it
+        if country_flag_path and country_flag_path.endswith('.svg'):
+            png_image = cairosvg.svg2png(url=country_flag_path)
+            flag_image = Image.open(BytesIO(png_image)).resize((50, 30))
             frame_pil.paste(flag_image, (x, y - 35), flag_image)
 
-        frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
-        out.write(frame)
+        letterbox_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+        out.write(letterbox_frame)
 
     cap.release()
     out.release()
@@ -107,8 +120,9 @@ def process_video(video_path, run_info, country_flags):
     return final_video_path
 
 
+
 def upload_video(file_name, run_info):
-    title = f"{run_info['player_name']} - {run_info['game_name']} - {run_info['category_name']}"
+    title = f"{run_info['player_name']} - {run_info['game_name']} - {run_info['category_name']} #Shorts"
     description = (
         "TikTok : https://www.tiktok.com/@speedrunspectre\n"
         "Instagram : https://www.instagram.com/speedrunspectre/\n\n"
