@@ -14,22 +14,23 @@ import google_auth_oauthlib.flow
 import googleapiclient.discovery
 import googleapiclient.errors
 import googleapiclient.http
+import google.oauth2.credentials
 from urllib.parse import urlparse, parse_qs
 
 # Variables + Constantes
 
 API_BASE_URL = "https://www.speedrun.com/api/v1"
 COUNTRY_FLAGS_FILE = "country_flags.json"
+TOKEN_FILE = "token.json"
+SCHEDULED_DATES_FILE = "scheduled_dates.json"
+USED_RUNS_DB_FILE = "used_runs_db.json"
+client_secrets_file = "client_secrets.json"
 DOWNLOAD_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_download"
 FINAL_VIDEO_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_final"
-USED_RUNS_DB_FILE = "used_runs_db.json"
 FLAGS_FOLDER_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\flags"
-SCHEDULED_DATES_FILE = "scheduled_dates.json"
-api_cache = {}
-
+FONT_PATH = "arial.ttf"
 scopes = ["https://www.googleapis.com/auth/youtube.upload"]
-client_secrets_file = "client_secrets.json"
-
+api_cache = {}
 
 def api_get(endpoint):
     global api_cache
@@ -45,13 +46,38 @@ def api_get(endpoint):
         print(f"Error in API request: {e}")
     return None
 
-
 def get_video_id_from_url(video_url):
     parsed_url = urlparse(video_url)
     if "youtube" in parsed_url.netloc:
         return parse_qs(parsed_url.query)['v'][0]
     # Ajouter d'autres logiques pour différents formats d'URL si nécessaire.
     return None
+
+def update_used_runs_db(game_id, category_id, video_id):
+    if os.path.exists(USED_RUNS_DB_FILE):
+        with open(USED_RUNS_DB_FILE, "r") as file:
+            used_runs_db = json.load(file)
+    else:
+        used_runs_db = {}
+
+    used_runs_db.setdefault(game_id, {}).setdefault(category_id, []).append(video_id)
+
+    with open(USED_RUNS_DB_FILE, "w") as file:
+        json.dump(used_runs_db, file, indent=4)
+
+def update_scheduled_dates(post_time):
+    if os.path.exists(SCHEDULED_DATES_FILE):
+        with open(SCHEDULED_DATES_FILE, "r") as file:
+            scheduled_dates = json.load(file)
+    else:
+        scheduled_dates = {}
+
+    str_date = post_time.strftime("%d/%m/%Y")
+    str_time = post_time.strftime("%H:%M:%S")
+    scheduled_dates.setdefault(str_date, []).append(str_time)
+
+    with open(SCHEDULED_DATES_FILE, "w") as file:
+        json.dump(scheduled_dates, file, indent=4)
 
 def process_video(video_path, run_info, country_flags):
     country_flag_path = get_flag_image_path(run_info['country'], country_flags)
@@ -65,12 +91,11 @@ def process_video(video_path, run_info, country_flags):
     orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Calculate new width and height to maintain 16:9 aspect ratio
     new_width = 720
     new_height = int((9 / 16) * new_width)
 
-    # Calculate padding to add to the top and bottom to maintain aspect ratio
-    vert_padding = (1280 - new_height) // 2
+    vert_padding = int((1280 - new_height) / 2)
+    horiz_padding = int((720 - new_width) / 2)
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     final_video_name = f"{run_info['game_name']} - {run_info['category_name']} - {run_info['player_name']}.mp4"
@@ -83,33 +108,25 @@ def process_video(video_path, run_info, country_flags):
         if not ret:
             break
 
-        # Resize frame while maintaining aspect ratio
         frame = cv2.resize(frame, (new_width, new_height))
 
-        # Create a new frame with black bars to maintain 9:16 aspect ratio
         letterbox_frame = np.zeros((1280, 720, 3), dtype=np.uint8)
-        letterbox_frame[vert_padding:vert_padding + new_height, :] = frame
+        letterbox_frame[vert_padding:vert_padding + new_height, horiz_padding:horiz_padding + new_width] = frame
 
-        # Convert to PIL to use advanced drawing functions
         frame_pil = Image.fromarray(cv2.cvtColor(letterbox_frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(frame_pil)
-        font = ImageFont.truetype("arial.ttf", 32)
-        x, y = 50, vert_padding + 50  # Adjust y position due to padding
+        font = ImageFont.truetype(FONT_PATH, 32)
+        x, y = 50 + horiz_padding, 50
 
-        # Draw text shadow
-        shadowcolor = "black"
-        for adj in range(-1, 2):
-            for adjy in range(-1, 2):
-                if adj != 0 or adjy != 0:
-                    draw.text((x + adj, y + adjy), text_content, font=font, fill=shadowcolor)
-        # Draw main text
         draw.text((x, y), text_content, font=font, fill="white")
 
-        # If a flag image is available, convert it from SVG to PNG and draw it
+        text_x, text_y, text_width, text_height = draw.textbbox((x, y), run_info['player_name'], font=font)
+        flag_x = text_x + text_width
+
         if country_flag_path and country_flag_path.endswith('.svg'):
             png_image = cairosvg.svg2png(url=country_flag_path)
             flag_image = Image.open(BytesIO(png_image)).resize((50, 30))
-            frame_pil.paste(flag_image, (x, y - 35), flag_image)
+            frame_pil.paste(flag_image, (flag_x, y), flag_image)
 
         letterbox_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
         out.write(letterbox_frame)
@@ -119,6 +136,31 @@ def process_video(video_path, run_info, country_flags):
 
     return final_video_path
 
+def create_youtube_client(client_secrets_file, scopes):
+    credentials = None
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, 'r') as file:
+            token_data = json.load(file)
+            credentials = google.oauth2.credentials.Credentials(
+                token=token_data.get('access_token'),
+                refresh_token=token_data.get('refresh_token'),
+                token_uri=token_data.get('token_uri'),
+                client_id=token_data.get('client_id'),
+                client_secret=token_data.get('client_secret'),
+                scopes=scopes
+            )
+
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(google.auth.transport.requests.Request())
+        else:
+            flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+                client_secrets_file, scopes)
+            credentials = flow.run_local_server(port=0)
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(credentials.to_json())
+
+    return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
 
 
 def upload_video(file_name, run_info):
@@ -165,17 +207,13 @@ def upload_video(file_name, run_info):
             }
         },
         
-        # Paramètre 'media_body' est le fichier média que vous téléchargez.
         media_body=googleapiclient.http.MediaFileUpload(file_name, resumable=True)
     )
     
-    # Exécuter la requête d'upload.
     response = request.execute()
 
     print(response)
 
-
-# Fonction pour traiter et ensuite uploader une vidéo
 def process_and_upload_video(video_path, run_info, country_flags):
     final_video_path = process_video(video_path, run_info, country_flags)
     if final_video_path:
@@ -185,12 +223,19 @@ def process_and_upload_video(video_path, run_info, country_flags):
 def read_scheduled_dates():
     if os.path.exists(SCHEDULED_DATES_FILE):
         with open(SCHEDULED_DATES_FILE, "r") as file:
-            return json.load(file)
-    return {}
+            try:
+                return json.load(file)
+            except json.JSONDecodeError:
+                # Le fichier est vide ou mal formé, retourner une structure de base
+                return {}
+    else:
+        # Le fichier n'existe pas, retourner une structure de base
+        return {}
 
 def write_scheduled_dates(scheduled_dates):
     with open(SCHEDULED_DATES_FILE, "w") as file:
         json.dump(scheduled_dates, file, indent=4)
+
 
 def get_next_available_slot():
     scheduled_dates = read_scheduled_dates()
@@ -295,7 +340,6 @@ def extract_run_data(run_data, game_name, category_name):
     player_id = run_data['players'][0]['id']
     player_name, country_code = get_player_info(player_id)
     
-    # Ajouter les liens pour la run et le profil du joueur
     run_link = run_data.get('weblink')
     player_profile_link = f"https://www.speedrun.com/user/{player_name}"
 
@@ -309,7 +353,6 @@ def extract_run_data(run_data, game_name, category_name):
         'run_link': run_link,
         'player_profile_link': player_profile_link
     }
-
 
 def safe_filename(filename):
     return re.sub(r'[\\/*?:"<>|]', '', filename)
@@ -326,13 +369,12 @@ def download_video(video_url):
     video_id = get_video_id_from_url(video_url)
     return downloaded_video_path, video_id
 
-
-
 def main():
     games = get_games()
     used_runs_db = {}
     downloaded_urls = set()
     api_cache = {}
+    youtube = create_youtube_client(client_secrets_file, scopes)
 
     with open(COUNTRY_FLAGS_FILE, 'r') as file:
         country_flags = json.load(file)
@@ -345,21 +387,33 @@ def main():
     while processed_videos < 3:
         game_id, game_name = random.choice(list(games.items()))
         if is_game_active(game_id):
-            categories = api_get(f"games/{game_id}/categories")['data']
-            for category in categories:
-                if category['id'] not in used_runs_db.get(game_id, []):
-                    top_run = get_top_run_from_category(game_id, category['id'], game_name)
-                    if top_run and top_run['video_url']:
-                        video_id = get_video_id_from_url(top_run['video_url'])
-                        if video_id not in used_runs_db.get(game_id, []):
-                            video_path, video_id = download_video(top_run['video_url'])
-                            process_and_upload_video(video_path, top_run, country_flags)
-                            used_runs_db.setdefault(game_id, []).append(video_id)
-                            downloaded_urls.add(top_run['video_url'])
-                            processed_videos += 1
+            categories_response = api_get(f"games/{game_id}/categories")
+            if categories_response is not None and 'data' in categories_response:
+                categories = categories_response['data']
+                for category in categories:
+                    category_id = category['id']
+                    if category_id not in used_runs_db.get(game_id, {}):
+                        top_run = get_top_run_from_category(game_id, category_id, game_name)
+                        if top_run and top_run['video_url']:
+                            video_id = get_video_id_from_url(top_run['video_url'])
+                            if video_id not in used_runs_db.get(game_id, {}).get(category_id, []):
+                                video_path, video_id = download_video(top_run['video_url'])
+                                final_video_path = process_video(video_path, top_run, country_flags)
+                                if final_video_path:
+                                    upload_video(final_video_path, top_run)
+                                    update_used_runs_db(game_id, category_id, video_id)
+
+                                    post_time = get_next_available_slot()
+                                    update_scheduled_dates(post_time)
+
+                                    processed_videos += 1
+                                    downloaded_urls.add(top_run['video_url'])
+            else:
+                print(f"Erreur lors de la récupération des catégories pour le jeu {game_id}")
 
     with open(USED_RUNS_DB_FILE, "w") as file:
         json.dump(used_runs_db, file, indent=4)
 
 if __name__ == "__main__":
     main()
+
