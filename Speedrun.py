@@ -3,32 +3,42 @@ import random
 import re
 import json
 import requests
+from urllib.parse import urlparse, parse_qs
 import yt_dlp
 import cv2
-from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-import cairosvg
-from io import BytesIO
-from urllib.parse import urlparse, parse_qs
+from PIL import Image
+from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, AudioFileClip, ImageClip
+from moviepy.config import change_settings
 
-# Variables + Constantes
+# Configuration pour ImageMagick (ajustez si nécessaire)
+change_settings({
+    "IMAGEMAGICK_BINARY": r"C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe",
+    "FFMPEG_BINARY": "ffmpeg",
+    "TEMP_FILE_DIR": r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_TEMP"  # Répertoire temporaire spécifié
+})
+
+# CONSTANTES
 API_BASE_URL = "https://www.speedrun.com/api/v1"
 USED_RUNS_DB_FILE = "used_runs_db.json"
 DOWNLOAD_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_download"
 FINAL_VIDEO_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_final"
 FLAGS_FOLDER_PATH = r"A:\Dossiers\Documents\SpeedRun_tiktok\flags"
-FONT_PATH = "arial.ttf"
 
+# Fonctions d'assistance API
 def api_get(endpoint):
+    url = f"{API_BASE_URL}/{endpoint}"
     try:
-        response = requests.get(f"{API_BASE_URL}/{endpoint}")
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"Erreur de réponse de l'API : Code de statut {response.status_code} pour {endpoint}")
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()
     except requests.RequestException as e:
-        print(f"Erreur de requête de l'API : {e}")
-    return None
+        print(f"Erreur lors de l'accès à {url}: {e}")
+        return None
+
+def get_game_name(game_id):
+    response = api_get(f"games/{game_id}")
+    return response['data']['names']['international']
 
 def get_video_id_from_url(video_url):
     parsed_url = urlparse(video_url)
@@ -58,96 +68,185 @@ def get_video_duration(video_path):
     cap.release()
     return duration
 
-def convert_svg_to_png(svg_path):
-    png_image = cairosvg.svg2png(url=svg_path)
-    return Image.open(BytesIO(png_image))
-
-def process_video(video_path, run_info, tiktok=True):
-    max_segment_duration = 61 if tiktok else 59
-    output_folder = os.path.join(FINAL_VIDEO_PATH if tiktok else r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_YT", safe_filename(f"{run_info['game_name']} - {run_info['category_name']}"))
-
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-
+def capture_random_frame(video_path):
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error opening video: {video_path}")
-        return None
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frames_to_capture = [random.randint(0, frame_count - 1) for _ in range(2)]  # Exemple : 2 images
 
-    # Extraction d'une image pour l'arrière-plan flou
-    ret, background_frame = cap.read()
-    if not ret:
-        print("Error reading the first frame for background.")
-        return None
-
-    # Application d'un flou gaussien sur l'image de fond
-    background_frame = cv2.GaussianBlur(background_frame, (21, 21), 0)
-    background_frame_resized = cv2.resize(background_frame, (720, 1280))
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    segment_duration_frames = int(max_segment_duration * fps)
-
-    segment_paths = []
-    segment_count = 0
-    total_frames_processed = 0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    while total_frames_processed < total_frames:
-        segment_name = f"{run_info['game_name']} - {run_info['category_name']} - {run_info['player_name']} - {'TikTok' if tiktok else 'YouTube'} Part {segment_count + 1}.mp4"
-        segment_path = os.path.join(output_folder, safe_filename(segment_name))
-        segment_paths.append(segment_path)
-
-        out = cv2.VideoWriter(segment_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (720, 1280))
-
-        for _ in range(segment_duration_frames):
-            if total_frames_processed >= total_frames:
-                break
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Redimensionnement et placement de la vidéo sur l'arrière-plan flou
-            frame_resized = cv2.resize(frame, (720, 1280 - 2 * int((1280 - 720 * 9 / 16) / 2)))
-            y_offset = int((1280 - 720 * 9 / 16) / 2)
-            final_frame = background_frame_resized.copy()
-            final_frame[y_offset:y_offset + frame_resized.shape[0], :] = frame_resized
-
-            frame_pil = Image.fromarray(cv2.cvtColor(final_frame, cv2.COLOR_BGR2RGB))
-            draw = ImageDraw.Draw(frame_pil)
-            font = ImageFont.truetype(FONT_PATH, 42)
-
-            # Ajout de l'ombre au texte
-            shadow_offset = 2
-            text_content = f"{run_info['player_name']}\n{run_info['game_name'].strip()}\n{run_info['category_name']}\n{run_info['date']}"
-            shadow_position = (50 + shadow_offset, 50 + shadow_offset)
-            draw.text(shadow_position, text_content, font=font, fill="black")
-
-            # Dessin du texte principal
-            text_position = (50, 50)
-            draw.text(text_position, text_content, font=font, fill="white")
-
-            flag_path = get_flag_image_path(run_info['country'])
-            if os.path.exists(flag_path):
-                flag_image = convert_svg_to_png(flag_path).resize((80, 70))
-                frame_pil.paste(flag_image, (300, 40), flag_image)
-
-            final_frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
-            out.write(final_frame)
-
-            total_frames_processed += 1
-
-        out.release()
-        segment_count += 1
+    frames = []
+    for frame_no in frames_to_capture:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+        success, frame = cap.read()
+        if success:
+            frames.append(frame)
 
     cap.release()
-    return segment_paths
+    return frames
 
+def resize_frame_to_banner(frame, banner_height):
+    height, width, _ = frame.shape
+    aspect_ratio = width / height
+    new_width = int(banner_height * aspect_ratio)
+    resized_frame = cv2.resize(frame, (new_width, banner_height), interpolation=cv2.INTER_AREA)
+    return resized_frame
+
+def add_banner_images_to_video(segment_clip, banner_images, banner_height):
+    for i, banner_image in enumerate(banner_images):
+        pil_banner_image = Image.fromarray(banner_image)
+        position = ("left", "bottom") if i == 0 else ("right", "bottom")
+        banner_clip = ImageClip(np.array(pil_banner_image)).set_duration(segment_clip.duration).set_position(position)
+        segment_clip = CompositeVideoClip([segment_clip, banner_clip])
+
+    return segment_clip
+
+#########################################################################################
 def get_flag_image_path(country_code):
-    return os.path.join(FLAGS_FOLDER_PATH, f"{country_code.lower()}.svg")
+    if country_code.lower() == "unknown":
+        return None
+    return os.path.join(FLAGS_FOLDER_PATH, f"{country_code.lower()}.png")
+
+def get_flag_image_clip(flag_png_path, duration):
+    pil_image = Image.open(flag_png_path)
+    np_image = np.array(pil_image)
+    image_clip = ImageClip(np_image, duration=duration)
+    image_clip = image_clip.resize(height=100).set_position(("right", "bottom"))
+    return image_clip
+
+
+def select_random_game(game_urls):
+    random_game_url = random.choice(game_urls)
+    game_id = random_game_url.split('/')[-1]
+    return game_id
+
+
+#########################################################################################
 
 def safe_filename(filename):
     return re.sub(r'[\\/*?:"<>|]', '', filename)
 
+def apply_gaussian_blur(image, blur_strength=15):
+    return cv2.GaussianBlur(image, (blur_strength, blur_strength), 0)
+
+def capture_frame(video_path, frame_number=0):
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    success, frame = cap.read()
+    cap.release()
+    return frame if success else None
+
+def process_video(video_path, run_info):
+    try:
+        # Charger la vidéo source
+        clip = VideoFileClip(video_path)
+        audio = clip.audio
+        audio_temp_path = os.path.join(r"A:\Dossiers\Documents\SpeedRun_tiktok\Video_TEMP", "temp_audio.mp3")
+        audio.write_audiofile(audio_temp_path)
+
+        # Dimensions originales de la vidéo
+        original_width, original_height = clip.size
+        original_aspect_ratio = original_width / original_height
+
+        # Définir les dimensions cibles pour le format 9:16
+        target_width = 720  # Largeur standard pour 9:16
+        target_height = 1280  # Hauteur standard pour 9:16
+
+        # Calculer les nouvelles dimensions pour conserver le rapport d'aspect original
+        if original_aspect_ratio > (9 / 16):
+            # Pour les vidéos plus larges que 9:16, ajuster la largeur
+            new_width = target_width
+            new_height = int(new_width / original_aspect_ratio)
+        else:
+            # Pour les vidéos plus hautes que 9:16, ajuster la hauteur
+            new_height = target_height
+            new_width = int(new_height * original_aspect_ratio)
+
+        # Assurer que la largeur et la hauteur sont divisibles par 2
+        new_width += new_width % 2
+        new_height += new_height % 2
+
+        # Redimensionner la vidéo
+        resized_clip = clip.resize(newsize=(new_width, new_height))
+
+        # Calculer les marges pour les bandes noires
+        margin_x = (target_width - new_width) // 2
+        margin_y = (target_height - new_height) // 2
+
+        # Ajouter des bandes noires pour obtenir un format 9:16
+        final_clip = CompositeVideoClip([resized_clip.set_position((margin_x, margin_y))], size=(target_width, target_height), bg_color=(0, 0, 0))
+
+        # Obtenir une image de la vidéo source
+        video_image = clip.get_frame(0)  # Vous pouvez ajuster le temps ici
+
+        # Redimensionner cette image à la même taille que la vidéo
+        video_image_resized = cv2.resize(video_image, (target_width, target_height), interpolation=cv2.INTER_AREA)
+
+        # Créer un clip d'image pour cette image
+        video_image_clip = ImageClip(np.array(Image.fromarray(cv2.cvtColor(video_image_resized, cv2.COLOR_BGR2RGB))))
+
+        # Ajouter ce clip d'image à votre clip vidéo final
+        final_clip = CompositeVideoClip([final_clip, video_image_clip])
+
+        # Durée maximale du segment fixée à 59 secondes
+        max_segment_duration = 89
+        segment_duration = min(clip.duration, max_segment_duration)
+        segment_count = int(clip.duration // segment_duration) + (clip.duration % segment_duration > 0)
+
+        # Dossier de sortie
+        segment_folder_name = safe_filename(f"{run_info['player_name']} - {run_info['game_name']} - {run_info['category_name']}")
+        output_folder = os.path.join(FINAL_VIDEO_PATH, segment_folder_name)
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
+        # Traitement de chaque segment
+        for i in range(segment_count):
+            part_suffix = f" - Part {i + 1}" if segment_count > 1 else ""
+            segment_title = f"{run_info['player_name']} - {run_info['game_name']} - {run_info['category_name']}{part_suffix}"
+            segment_path = os.path.join(output_folder, f"{segment_title}.mp4")
+
+            start_time = i * segment_duration
+            end_time = min((i + 1) * segment_duration, clip.duration)
+
+            if start_time < clip.duration:
+                segment_clip = clip.subclip(start_time, end_time)
+
+                # Redimensionner et positionner le segment
+                resized_segment_clip = segment_clip.resize(newsize=(new_width, new_height))
+                positioned_clip = CompositeVideoClip([resized_segment_clip.set_position((margin_x, margin_y))], size=(target_width, target_height), bg_color=(0, 0, 0))
+
+                # Ajout du texte
+                txt_clip = TextClip(f"Pseudo: {run_info['player_name']}\nJeux: {run_info['game_name']}\nCatégorie: {run_info['category_name']}\nDate: {run_info['date']}",
+                                    fontsize=30, color='white', stroke_color='black', stroke_width=0.5, align="West")
+                txt_clip = txt_clip.set_position(('left', 'top')).set_duration(positioned_clip.duration)
+
+                # Charger l'image du drapeau
+                flag_image_path = get_flag_image_path(run_info['country'])
+                if flag_image_path and os.path.exists(flag_image_path):
+                    flag_img = ImageClip(flag_image_path).set_duration(positioned_clip.duration).resize(height=50)  # Ajustez la taille selon vos besoins
+                    flag_img = flag_img.set_position(("right", "top"))  # Ajustez la position selon vos besoins
+
+                    # Composition de la vidéo finale pour le segment avec le drapeau
+                    final_segment_clip = CompositeVideoClip([positioned_clip, txt_clip, flag_img])
+                else:
+                    # Si l'image du drapeau n'est pas trouvée, continuez sans le drapeau
+                    final_segment_clip = CompositeVideoClip([positioned_clip, txt_clip])
+
+                # Écriture du fichier vidéo pour le segment
+                final_segment_clip.write_videofile(segment_path, codec="libx264", audio_codec="aac", bitrate="8000k", ffmpeg_params=["-pix_fmt", "yuv420p"])
+            else:
+                break
+
+        # Création du fichier de description
+        create_description_file(run_info, output_folder)
+
+        # Nettoyage des fichiers temporaires
+        os.remove(audio_temp_path)
+
+        return output_folder
+    except Exception as e:
+        print(f"Error processing video: {e}")
+        return None
+
+    
 def get_levels(game_id):
     response = api_get(f"games/{game_id}/levels")
     if response and 'data' in response:
@@ -211,7 +310,7 @@ def get_top_run_from_category(game_id, category_id, game_name):
 
 def is_run_valid(run_data):
     run_duration = run_data.get('times', {}).get('primary_t', 0)
-    return 10 <= run_duration <= 300
+    return 20 <= run_duration <= 300
 
 def extract_run_data(run_data, game_name, category_name, run_duration):
     if 'players' in run_data and run_data['players']:
@@ -241,17 +340,33 @@ def extract_run_data(run_data, game_name, category_name, run_duration):
         'duration': run_duration
     }
 
+def read_game_urls(file_path):
+    with open(file_path, 'r') as file:
+        return [line.strip() for line in file if line.strip()]
+    
+def extract_game_id_from_url(url):
+    return url.split('/')[-1]
+
+################################################################################################
+
+
+
 def download_video(video_url):
     ydl_opts = {
         'format': 'best',
         'outtmpl': os.path.join(DOWNLOAD_PATH, '%(title)s-%(id)s.%(ext)s'),
         'noplaylist': True
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(video_url, download=True)
-        downloaded_video_path = ydl.prepare_filename(info_dict)
-    video_id = get_video_id_from_url(video_url)
-    return downloaded_video_path, video_id
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(video_url, download=True)
+            downloaded_video_path = ydl.prepare_filename(info_dict)
+        video_id = get_video_id_from_url(video_url)
+        return downloaded_video_path, video_id
+    except Exception as e:
+        print(f"Erreur lors du téléchargement de la vidéo : {e}")
+        return None, None
 
 def create_description_file(run_info, folder_path):
     description_template = (
@@ -267,27 +382,13 @@ def create_description_file(run_info, folder_path):
         "Date: {date}\n"
     )
 
-    description = description_template.format(
-        run_link=run_info['run_link'],
-        player_profile_link=run_info['player_profile_link'],
-        player_name=run_info['player_name'],
-        game_name=run_info['game_name'],
-        category_name=run_info['category_name'],
-        date=run_info['date']
-    )
+    description = description_template.format_map(run_info)
 
     description_file_path = os.path.join(folder_path, 'description.txt')
     with open(description_file_path, 'w') as file:
         file.write(description)
 
     return description_file_path
-
-def read_game_urls(file_path):
-    with open(file_path, 'r') as file:
-        return [line.strip() for line in file if line.strip()]
-
-def extract_game_id_from_url(url):
-    return url.split('/')[-1]
 
 def main():
     game_urls_file = r"A:\Dossiers\Documents\SpeedRun_tiktok\game_urls.txt"
@@ -299,16 +400,16 @@ def main():
             used_runs_db = json.load(file)
 
     processed_videos = 0
+    last_game_id = None
+
     while processed_videos < 10000:
-        random_game_url = random.choice(game_urls)
-        game_id = extract_game_id_from_url(random_game_url)
+        game_id = select_random_game(game_urls)
 
-        game_name_response = api_get(f"games/{game_id}")
-        if not game_name_response or 'data' not in game_name_response:
-            print(f"Erreur lors de la récupération du nom pour le jeu {game_id}")
-            continue
+        # Assurer que le jeu sélectionné n'est pas le même que le dernier traité
+        while game_id == last_game_id:
+            game_id = select_random_game(game_urls)
 
-        game_name = game_name_response['data']['names']['international']
+        game_name = get_game_name(game_id)
 
         categories_response = api_get(f"games/{game_id}/categories")
         if not categories_response or 'data' not in categories_response:
@@ -328,26 +429,30 @@ def main():
                 continue
 
             if "youtube.com" in top_run['video_url'] or "twitch.tv" in top_run['video_url'] or "youtu.be" in top_run['video_url']:
-                video_path, video_id = download_video(top_run['video_url'])
-                video_duration = get_video_duration(video_path)
-
-                if video_duration <= top_run['duration'] + 120:
-                    final_video_paths_tiktok = process_video(video_path, top_run, tiktok=True)
-                    final_video_paths_youtube = process_video(video_path, top_run, tiktok=False)
-                    print(f"Processed video for TikTok and YouTube: {video_path}")
-                    processed_videos += 1
-
-                update_used_runs_db(game_id, category_id, video_id)
+                try:
+                    video_path, video_id = download_video(top_run['video_url'])
+                    video_duration = get_video_duration(video_path)
+                    if video_duration <= top_run['duration'] + 120:
+                        process_video(video_path, top_run)
+                        processed_videos += 1
+                    update_used_runs_db(game_id, category_id, video_id)
+                except Exception as e:
+                    print(f"Skipping video due to error: {e}")
+                    update_used_runs_db(game_id, category_id, video_id)
+                    continue
             else:
                 print(f"Skipping non-YouTube/Twitch video: {top_run['video_url']}")
                 update_used_runs_db(game_id, category_id, video_id)
 
-            if processed_videos >= 10000:
-                break
+        # Sauvegarder régulièrement l'état de used_runs_db
+        with open(USED_RUNS_DB_FILE, "w") as file:
+            json.dump(used_runs_db, file, indent=4)
 
-        if processed_videos >= 10000:
-            break
+        last_game_id = game_id  # Mettre à jour le dernier jeu traité
 
+    # Sauvegarde finale de l'état de used_runs_db
+    update_used_runs_db(game_id, category_id, video_id)
+    print(f"Updated used_runs_db: game_id={game_id}, category_id={category_id}, video_id={video_id}")
     with open(USED_RUNS_DB_FILE, "w") as file:
         json.dump(used_runs_db, file, indent=4)
 
